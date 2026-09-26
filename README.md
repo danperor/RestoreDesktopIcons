@@ -56,7 +56,7 @@
 ### 编译构建
 ```bash
 # 克隆代码仓库
-git clone <your-repo-url>
+git clone https://github.com/danperor/RestoreDesktopIcons.git
 cd RestoreDesktopIcons
 
 # 还原并编译发布版本
