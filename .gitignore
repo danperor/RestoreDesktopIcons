@@ -1,0 +1,27 @@
+## 编译产物
+[Bb]in/
+[Oo]bj/
+*.nupkg
+
+## Visual Studio & IDE 临时缓存
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vscode/
+.idea/
+
+## 运行时数据与日志（用户现场数据，不进入版本库）
+app.log
+app.old.log
+screenshots/
+layouts.json
+settings.json
+
+## 历史调试过程测试截图
+defview_*.png
+list_*.png
+progman_*.png
+pure_desktop_*.jpg
+app_icon_preview.png
