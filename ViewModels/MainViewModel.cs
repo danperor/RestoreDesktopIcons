@@ -2,9 +2,9 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
-using MessageBox = System.Windows.MessageBox;
 using RestoreDesktopIcons.Models;
 using RestoreDesktopIcons.Services;
+using RestoreDesktopIcons.Views;
 
 namespace RestoreDesktopIcons.ViewModels;
 
@@ -378,13 +378,11 @@ public class MainViewModel : ViewModelBase
         try
         {
             var snapshotToDelete = SelectedSnapshot;
-            var result = MessageBox.Show(
-                $"确定要删除快照「{snapshotToDelete.Name}」吗？",
-                "确认删除",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
+            bool confirmed = ModernMessageBox.ConfirmDelete(
+                $"确定要删除快照「{snapshotToDelete.Name}」吗？\n删除后将无法恢复该快照备份。",
+                "确认删除快照");
 
-            if (result == MessageBoxResult.Yes)
+            if (confirmed)
             {
                 Snapshots.Remove(snapshotToDelete);
                 SelectedSnapshot = Snapshots.FirstOrDefault();
@@ -489,12 +487,12 @@ public class MainViewModel : ViewModelBase
             catch (Exception ex)
             {
                 AppLogger.Warn($"打开桌面截图失败: {targetPath}", ex);
-                MessageBox.Show($"无法打开截图文件: {ex.Message}", "查看截图", MessageBoxButton.OK, MessageBoxImage.Warning);
+                ModernMessageBox.ShowWarning($"无法打开截图文件: {ex.Message}", "查看截图");
             }
         }
         else
         {
-            MessageBox.Show("该快照尚未包含截图文件（可能是旧版本生成的快照）。\n重新点击【保存当前布局】即可生成带独立分屏及无遮挡纯净截图的新快照。", "查看截图", MessageBoxButton.OK, MessageBoxImage.Information);
+            ModernMessageBox.ShowInfo("该快照尚未包含截图文件（可能是旧版本生成的快照）。\n重新点击【保存当前布局】即可生成带独立分屏及无遮挡纯净截图的新快照。", "查看截图");
         }
     }
 
@@ -533,13 +531,13 @@ public class MainViewModel : ViewModelBase
             }
             else
             {
-                MessageBox.Show($"运行日志文件尚未生成: {path}", "查看运行日志", MessageBoxButton.OK, MessageBoxImage.Information);
+                ModernMessageBox.ShowInfo($"运行日志文件尚未生成:\n{path}", "查看运行日志");
             }
         }
         catch (Exception ex)
         {
             AppLogger.Warn("打开运行日志文件失败", ex);
-            MessageBox.Show($"打开运行日志失败: {ex.Message}", "查看运行日志", MessageBoxButton.OK, MessageBoxImage.Warning);
+            ModernMessageBox.ShowWarning($"打开运行日志失败: {ex.Message}", "查看运行日志");
         }
     }
 }

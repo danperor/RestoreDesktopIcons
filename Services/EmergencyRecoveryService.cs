@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.Versioning;
+using System.Text;
 using Microsoft.Win32;
 using Windows.Win32;
 using Windows.Win32.System.Console;
@@ -19,7 +20,7 @@ public static class EmergencyRecoveryService
 {
     private static Process? _watchdogProcess;
     private static PHANDLER_ROUTINE? _consoleCtrlHandler;
-    private static EventWaitHandle? _cleanExitEvent;
+    private static string? _markerFilePath;
     private static readonly object _lock = new();
     private static bool _isInitialized;
 
@@ -35,14 +36,16 @@ public static class EmergencyRecoveryService
 
             int currentPid = Environment.ProcessId;
 
-            // 创建专属于本主进程 PID 的“正常退出”内核事件握手信号
+            // 创建专属于本主进程 PID 的“存活中”标识文件
+            // 只要进程非正常退场（硬杀、崩溃、异常终止），该标记文件就会保留在磁盘上
             try
             {
-                _cleanExitEvent = new EventWaitHandle(false, EventResetMode.ManualReset, $"Local\\RestoreDesktopIcons_CleanExit_{currentPid}");
+                _markerFilePath = Path.Combine(Path.GetTempPath(), $"RestoreDesktopIcons_{currentPid}.active");
+                File.WriteAllText(_markerFilePath, $"{DateTime.Now:O}|{currentPid}");
             }
             catch (Exception ex)
             {
-                AppLogger.Warn("[Emergency] 创建 CleanExit 内核事件失败", ex);
+                AppLogger.Warn("[Emergency] 创建存活标记文件失败", ex);
             }
 
             // 1. 注册 AppDomain 级异常崩溃
@@ -85,13 +88,16 @@ public static class EmergencyRecoveryService
     }
 
     /// <summary>
-    /// 标记主进程已正常完成退出与善后处理（通知 Watchdog 无需进行异常干预，彻底避免竞态误翻转）
+    /// 标记主进程已正常完成退出与善后处理（删除存活标记文件，通知 Watchdog 无需进行异常干预）
     /// </summary>
     public static void MarkCleanExit()
     {
         try
         {
-            _cleanExitEvent?.Set();
+            if (!string.IsNullOrEmpty(_markerFilePath) && File.Exists(_markerFilePath))
+            {
+                File.Delete(_markerFilePath);
+            }
         }
         catch { }
     }
@@ -118,6 +124,8 @@ public static class EmergencyRecoveryService
 
     /// <summary>
     /// 启动独立的 Watchdog 进程监控主进程存活 (后台线程池异步执行，彻底避免启动阶段阻塞 UI 主线程)
+    /// 使用独立的 powershell.exe 系统宿主监控主进程，彻底杜绝主进程被按映像名 taskkill /IM RestoreDesktopIcons.exe 连带误杀，
+    /// 且绝不占用目标 exe 句柄锁，使项目随时可自由重编译构建。
     /// </summary>
     private static void StartWatchdogSupervisor()
     {
@@ -129,11 +137,18 @@ public static class EmergencyRecoveryService
                 if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath)) return;
 
                 int currentPid = Environment.ProcessId;
+                string markerPath = _markerFilePath ?? Path.Combine(Path.GetTempPath(), $"RestoreDesktopIcons_{currentPid}.active");
+
+                // 独立外部宿主监视命令：
+                // 1. Wait-Process 等待主进程退出（使用 Windows 内核句柄阻塞，0% CPU 开销）
+                // 2. 检查存活标记文件：若标记文件仍在，说明遭遇非正常退出（硬杀/崩溃），立即调用主程序恢复桌面图标
+                // 3. 若标记文件已被正常删除，说明为主进程正常退出，静默退出不做干预
+                string command = $"Wait-Process -Id {currentPid} -ErrorAction SilentlyContinue; if (Test-Path '{markerPath}') {{ Remove-Item '{markerPath}' -Force -ErrorAction SilentlyContinue; Start-Process -FilePath '{exePath}' -ArgumentList 'show' -WindowStyle Hidden }}";
 
                 var psi = new ProcessStartInfo
                 {
-                    FileName = exePath,
-                    Arguments = $"--watchdog {currentPid}",
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{command}\"",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden
@@ -142,7 +157,7 @@ public static class EmergencyRecoveryService
                 _watchdogProcess = Process.Start(psi);
                 if (_watchdogProcess != null)
                 {
-                    AppLogger.Info($"[Emergency] 内核级 Watchdog 守护子进程已异步启动 (PID={_watchdogProcess.Id}, 正在监控主进程 PID={currentPid})");
+                    AppLogger.Info($"[Emergency] 独立外部 Watchdog 守护进程已就绪 (PID={_watchdogProcess.Id}, 宿主=powershell.exe, 正在坚守主进程 PID={currentPid})");
                 }
             }
             catch (Exception ex)
@@ -211,15 +226,6 @@ public static class EmergencyRecoveryService
             {
                 AppLogger.Warn($"[Watchdog] 桌面图标处于隐藏残留状态，正在执行强制应急还原...");
                 DesktopIconVisibilityService.ShowDesktopIcons();
-
-                // 缓冲 150ms 确认桌面图标是否已经翻转回显示状态
-                Thread.Sleep(150);
-                if (!DesktopIconVisibilityService.AreDesktopIconsVisible())
-                {
-                    AppLogger.Warn("[Watchdog] 桌面图标初次恢复未确认，进行第二次保障性触发...");
-                    DesktopIconVisibilityService.ShowDesktopIcons();
-                }
-
                 AppLogger.Info("[Watchdog] 桌面图标已成功强制还原，保护用户桌面正常使用完毕！");
             }
             else

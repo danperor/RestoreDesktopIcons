@@ -64,7 +64,23 @@ internal static class DesktopIconVisibilityService
     {
         bool isVisible = true;
 
-        // 方案1: 注册表检查 (最可靠权威)
+        // 方案1: 优先检查 SysListView32 真实窗口物理可见性（毫秒级内核直取，绝无注册表写回延迟）
+        try
+        {
+            HWND hListView = FindDesktopListView();
+            if (!hListView.IsNull)
+            {
+                isVisible = PInvoke.IsWindowVisible(hListView);
+                UpdateCache(isVisible);
+                return isVisible;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("通过窗口可见性检查桌面图标状态失败", ex);
+        }
+
+        // 方案2: 降级通过注册表 HideIcons 检查
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(
@@ -83,22 +99,6 @@ internal static class DesktopIconVisibilityService
         catch (Exception ex)
         {
             AppLogger.Warn("通过注册表检查桌面图标可见性失败", ex);
-        }
-
-        // 方案2: 检查 SysListView32 窗口可见性降级方案
-        try
-        {
-            HWND hListView = FindDesktopListView();
-            if (!hListView.IsNull)
-            {
-                isVisible = PInvoke.IsWindowVisible(hListView);
-                UpdateCache(isVisible);
-                return isVisible;
-            }
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Warn("通过窗口可见性检查桌面图标状态失败", ex);
         }
 
         UpdateCache(isVisible);
@@ -127,10 +127,13 @@ internal static class DesktopIconVisibilityService
             return;
         }
 
+        bool oldState = CachedVisibility;
+        bool newState = !oldState;
+
         PInvoke.SendMessage(hDefView, WM_COMMAND, (WPARAM)(nuint)TOGGLE_DESKTOP_ICONS_CMD, (LPARAM)0);
 
-        // 发送完指令后，同步刷新权威物理状态，保证缓存与物理状态绝对一致
-        bool newState = AreDesktopIconsVisible();
+        // 立即同步内存缓存为切换后的新状态，杜绝注册表异步延迟导致的重复翻转竞态
+        UpdateCache(newState);
         AppLogger.Info($"已向 SHELLDLL_DefView 发送 WM_COMMAND(0x7402)，桌面图标显隐切换为: {(newState ? "显示" : "隐藏")}");
     }
 
@@ -193,7 +196,7 @@ internal static class DesktopIconVisibilityService
     /// <summary>
     /// 定位 SHELLDLL_DefView 句柄（带 IsWindow 有效性校验的高速内存缓存）
     /// </summary>
-    private static HWND FindDefView()
+    private static unsafe HWND FindDefView()
     {
         // 快速路径：若缓存句柄依然有效，直接返回（毫秒级变为纳秒级，免去重复 COM 开销）
         if (_cachedDefView != HWND.Null && PInvoke.IsWindow(_cachedDefView))
@@ -201,11 +204,15 @@ internal static class DesktopIconVisibilityService
             return _cachedDefView;
         }
 
+        EnsureDesktopAccess();
+
         // 1. 优先使用原生 Win32 超高速内存探测 (Progman -> DefView，耗时 < 0.01ms)
         HWND hProgman = PInvoke.FindWindow("Progman", null);
+        AppLogger.Info($"[FindDefView] Step1 hProgman: 0x{(IntPtr)hProgman.Value:X}");
         if (!hProgman.IsNull)
         {
             HWND def = PInvoke.FindWindowEx(hProgman, HWND.Null, "SHELLDLL_DefView", null);
+            AppLogger.Info($"[FindDefView] Step1 def in Progman: 0x{(IntPtr)def.Value:X}");
             if (!def.IsNull)
             {
                 _cachedDefView = def;
@@ -225,6 +232,7 @@ internal static class DesktopIconVisibilityService
             }
             return true;
         }, 0);
+        AppLogger.Info($"[FindDefView] Step2 foundDef in WorkerW: 0x{(IntPtr)foundDef.Value:X}");
 
         if (!foundDef.IsNull)
         {
@@ -236,13 +244,17 @@ internal static class DesktopIconVisibilityService
         try
         {
             IntPtr comHwnd = DesktopShellCsWin32Service.GetDesktopViewHwnd();
+            AppLogger.Info($"[FindDefView] Step3 comHwnd: 0x{comHwnd:X}");
             if (comHwnd != IntPtr.Zero)
             {
                 _cachedDefView = (HWND)comHwnd;
                 return _cachedDefView;
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AppLogger.Error("[FindDefView] Step3 COM failed", ex);
+        }
 
         _cachedDefView = foundDef;
         return _cachedDefView;
@@ -251,11 +263,24 @@ internal static class DesktopIconVisibilityService
     /// <summary>
     /// 定位桌面 SysListView32 句柄 (SHELLDLL_DefView 的子窗口)
     /// </summary>
-    private static HWND FindDesktopListView()
+    private static unsafe HWND FindDesktopListView()
     {
         HWND hDefView = FindDefView();
         if (hDefView.IsNull) return HWND.Null;
 
         return PInvoke.FindWindowEx(hDefView, HWND.Null, "SysListView32", null);
+    }
+
+    private static void EnsureDesktopAccess()
+    {
+        try
+        {
+            var hWinSta = PInvoke.OpenWindowStation("WinSta0", false, 0x10000000);
+            if (!hWinSta.IsInvalid) PInvoke.SetProcessWindowStation(hWinSta);
+
+            var hDesk = PInvoke.OpenDesktop("Default", 0, false, 0x10000000);
+            if (!hDesk.IsInvalid) PInvoke.SetThreadDesktop(hDesk);
+        }
+        catch { }
     }
 }

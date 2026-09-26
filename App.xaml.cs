@@ -7,6 +7,7 @@ using RestoreDesktopIcons.Models;
 using RestoreDesktopIcons.Services;
 
 using Windows.Win32;
+using Windows.Win32.Foundation;
 
 namespace RestoreDesktopIcons;
 
@@ -18,28 +19,6 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-
-        // 全局未捕获异常守护日志与桌面图标应急还原
-        AppDomain.CurrentDomain.UnhandledException += (s, args) =>
-        {
-            AppLogger.Error("进程全局未捕获异常 (AppDomain)", args.ExceptionObject as Exception);
-            EmergencyRecoveryService.RestoreDesktopIconsIfHidden("AppDomain 未捕获异常");
-        };
-        DispatcherUnhandledException += (s, args) =>
-        {
-            AppLogger.Error("WPF UI 线程未捕获异常", args.Exception);
-            EmergencyRecoveryService.RestoreDesktopIconsIfHidden("WPF UI 线程未捕获异常");
-        };
-        TaskScheduler.UnobservedTaskException += (s, args) =>
-        {
-            AppLogger.Error("异步 Task 未观察异常", args.Exception);
-            args.SetObserved();
-        };
-        Exit += (s, args) =>
-        {
-            EmergencyRecoveryService.RestoreDesktopIconsIfHidden("WPF Application Exit 退出");
-            EmergencyRecoveryService.MarkCleanExit();
-        };
 
         var cmdArgs = Environment.GetCommandLineArgs();
         bool startMinimized = false;
@@ -115,7 +94,10 @@ Windows 11 桌面图标守护程序 (RestoreDesktopIcons) CLI 命令行说明：
                     AppLogger.Info(mInfo);
                 }
                 var (liveIcons, curMode, curSpX, curSpY) = DesktopShellCsWin32Service.CaptureDesktopIcons();
-                string iconSummary = $"Total live icons: {liveIcons.Count}, ViewMode={curMode}, Spacing=({curSpX},{curSpY})";
+
+
+                bool isVis = DesktopIconVisibilityService.AreDesktopIconsVisible();
+                string iconSummary = $"Total live icons: {liveIcons.Count}, ViewMode={curMode}, Spacing=({curSpX},{curSpY}), AreIconsVisible={isVis}";
                 AppLogger.Info(iconSummary);
                 for (int i = 0; i < liveIcons.Count; i++)
                 {
@@ -298,12 +280,32 @@ Windows 11 桌面图标守护程序 (RestoreDesktopIcons) CLI 命令行说明：
             return;
         }
 
+        // 常驻托盘应用：必须设置为 OnExplicitShutdown，避免主窗口隐藏或最小化时 WPF 自动退出
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+
         // 初始化全局设置、自动隐藏调度器与系统托盘服务
         var settings = LayoutStorageService.LoadSettings();
         AutoHideCoordinator.Initialize(settings);
 
         // 挂载全局异常与内核级 Watchdog 守护子进程
         EmergencyRecoveryService.Initialize();
+
+        // 仅在常驻守护进程模式下挂载 WPF 退出及 UI 线程异常监听
+        DispatcherUnhandledException += (s, args) =>
+        {
+            AppLogger.Error("WPF UI 线程未捕获异常", args.Exception);
+            EmergencyRecoveryService.RestoreDesktopIconsIfHidden("WPF UI 线程未捕获异常");
+        };
+        TaskScheduler.UnobservedTaskException += (s, args) =>
+        {
+            AppLogger.Error("异步 Task 未观察异常", args.Exception);
+            args.SetObserved();
+        };
+        Exit += (s, args) =>
+        {
+            EmergencyRecoveryService.RestoreDesktopIconsIfHidden("WPF Application Exit 退出");
+            EmergencyRecoveryService.MarkCleanExit();
+        };
 
         var mainWindow = new Views.MainWindow();
         TrayIconService.Initialize(mainWindow);

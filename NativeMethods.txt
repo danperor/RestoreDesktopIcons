@@ -70,3 +70,4 @@ HOOKPROC
 IsWindow
 SetConsoleCtrlHandler
 PHANDLER_ROUTINE
+EnumChildWindows
